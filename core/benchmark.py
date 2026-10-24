@@ -9,7 +9,7 @@ Two kinds of comparison, matching the project's two "novelty" claims:
      effect beyond just makespan.
 
   2. DYNAMIC comparison: for a random disruption mid-schedule, compare
-     SELECTIVE re-optimization (Day 8) against a NAIVE baseline that just
+     SELECTIVE re-optimization against a NAIVE baseline that just
      reschedules the ENTIRE remaining DAG from scratch with plain HEFT.
      This demonstrates Novelty C (selective repair) actually saves
      computation time, which is the whole point of "selective."

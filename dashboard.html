@@ -1,800 +1,143 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#07090a">
+<meta name="description" content="Compare four ways of scheduling a task workflow onto cloud instances: sequential, HEFT, HEFT with local search, and a budget-aware variant.">
 <title>Cloud Fleet Optimizer</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
-<style>
-  /* ---------- tokens (AWS inspired dark/light theme) ---------- */
-  :root {
-    --bg:#0f141a; --panel:#1b2430; --panel2:#222f3e; --sunken:#121821;
-    --border:#303e50; --border2:#43556d;
-    --text:#f2f4f8; --text2:#9ba3af; --muted:#6c7a89;
-    --accent:#ff9900; --accent-ink:#0f141a;
-    --good:#2ecc71; --bad:#e74c3c; --idle:rgba(231,76,60,.18);
-    --c-naive:#e74c3c; --c-heft:#8fa4c4; --c-ils:#00a4e4; --c-cost:#ff9900;
-    --ease:cubic-bezier(.22,.8,.3,1);
-    color-scheme: dark;
-  }
-  @media (prefers-color-scheme: light) {
-    :root {
-      --bg:#f8f9fa; --panel:#ffffff; --panel2:#f1f3f5; --sunken:#e9ecef;
-      --border:#dee2e6; --border2:#ced4da;
-      --text:#1a202c; --text2:#4a5568; --muted:#718096;
-      --accent:#ff9900; --accent-ink:#ffffff;
-      --good:#27ae60; --bad:#d35400; --idle:rgba(211,84,0,.12);
-      --c-naive:#c0392b; --c-heft:#576574; --c-ils:#0082b4; --c-cost:#d35400;
-      color-scheme: light;
-    }
-  }
-  * { box-sizing:border-box; }
-  html { scroll-behavior:smooth; }
-  body { margin:0; background:var(--bg); color:var(--text);
-    font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased; }
-  .mono, output, .num { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-variant-numeric:tabular-nums; }
-  h1,h2,h3,p { margin:0; }
-  .page { max-width:1120px; margin:0 auto; padding:40px 20px 80px; }
-
-  .eyebrow { display:block; font-size:11px; font-weight:600; letter-spacing:.07em; text-transform:uppercase; color:var(--accent); margin-bottom:8px; }
-  h1 { font-size:26px; letter-spacing:-.01em; margin-bottom:8px; }
-  .sub { color:var(--text2); max-width:70ch; }
-  .masthead { margin-bottom:24px; border-left:4px solid var(--accent); padding-left:16px; }
-
-  .panel { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:18px 20px; margin-bottom:16px; box-shadow:0 4px 12px rgba(0,0,0,.15); }
-  .panel-title { font-size:12px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); margin-bottom:12px; }
-  .section-title { font-size:18px; font-weight:650; margin:34px 0 4px; }
-  .section-note { color:var(--text2); margin-bottom:14px; max-width:78ch; }
-
-  /* ---------- controls ---------- */
-  .controls { display:grid; grid-template-columns:repeat(4,1fr); gap:18px 24px; align-items:end; position:sticky; top:8px; z-index:5;
-    box-shadow:0 6px 24px rgba(0,0,0,.25); backdrop-filter:blur(8px); border-top:3px solid var(--accent); }
-  .field label { display:flex; justify-content:space-between; font-size:12px; color:var(--text2); margin-bottom:6px; }
-  .field output { color:var(--text); }
-  input[type=range] { width:100%; accent-color:var(--accent); margin:0; }
-  input[type=number] { width:100%; background:var(--sunken); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font:inherit; }
-  .seedrow { display:flex; gap:8px; }
-  .actions { grid-column:1 / -1; display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
-  .btn { background:var(--panel2); color:var(--text); border:1px solid var(--border2); border-radius:7px; padding:8px 14px; font:inherit; font-weight:550; cursor:pointer;
-    transition:background .15s, transform .1s, opacity .15s; }
-  .btn:hover { background:var(--sunken); border-color:var(--accent); }
-  .btn:active { transform:translateY(1px); }
-  .btn.primary { background:var(--accent); color:var(--accent-ink); border-color:transparent; font-weight:600; }
-  .btn.primary:hover { filter:brightness(1.08); }
-  .btn:disabled { opacity:.5; cursor:progress; }
-  .check { display:flex; align-items:center; gap:7px; color:var(--text2); margin-left:auto; cursor:pointer; }
-  @media (max-width:820px) { .controls { grid-template-columns:1fr 1fr; position:static; } }
-
-  .error { background:rgba(231,76,60,.15); border:1px solid var(--bad); color:var(--text); padding:12px 16px; border-radius:8px; margin-bottom:16px; }
-  .error code { background:var(--sunken); padding:1px 5px; border-radius:4px; }
-
-  /* ---------- pipeline ---------- */
-  .steps { list-style:none; margin:0; padding:0; display:grid; grid-template-columns:repeat(6,1fr); gap:10px; }
-  .step { position:relative; background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:10px 12px 12px; min-height:112px;
-    transition:border-color .3s, background .3s, opacity .3s; opacity:.55; }
-  .step.active { opacity:1; border-color:var(--accent); background:var(--sunken); }
-  .step.done { opacity:1; }
-  .step .n { font-size:11px; color:var(--muted); }
-  .step .t { font-weight:600; font-size:13px; margin:2px 0 4px; }
-  .step .d { font-size:11.5px; color:var(--muted); line-height:1.4; }
-  .step .ms { position:absolute; right:10px; top:10px; font-size:11px; color:var(--accent); opacity:0; transition:opacity .3s; }
-  .step.done .ms { opacity:1; }
-  .step .bar { position:absolute; left:0; bottom:0; height:3px; width:0; background:var(--accent); border-radius:0 0 8px 8px; transition:width .6s var(--ease); }
-  @media (max-width:900px) { .steps { grid-template-columns:repeat(2,1fr); } }
-
-  /* ---------- results container ---------- */
-  .results { transition:opacity .35s ease, filter .35s ease; }
-  .results.loading { opacity:.4; filter:saturate(.6); pointer-events:none; }
-  .results[hidden] { display:none; }
-
-  .badges { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:16px; }
-  .badge { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px 18px; border-top:3px solid var(--c, var(--accent)); }
-  .badge .lab { font-size:12px; color:var(--muted); }
-  .badge .big { font-size:34px; font-weight:700; letter-spacing:-.02em; margin:4px 0; }
-  .badge .big.pos { color:var(--good); } .badge .big.neg { color:var(--bad); } .badge .big.zero { color:var(--text2); }
-  .badge .note { font-size:12.5px; color:var(--text2); }
-  @media (max-width:820px) { .badges { grid-template-columns:1fr; } }
-
-  /* ---------- comparison bars ---------- */
-  .seg { display:inline-flex; background:var(--sunken); border:1px solid var(--border); border-radius:8px; padding:3px; gap:2px; margin-bottom:14px; flex-wrap:wrap; }
-  .seg button { background:none; border:0; color:var(--text2); padding:5px 12px; border-radius:6px; font:inherit; cursor:pointer; transition:background .2s, color .2s; }
-  .seg button.on { background:var(--panel2); color:var(--text); box-shadow:0 0 0 1px var(--border2) inset; }
-  .brow { display:grid; grid-template-columns:170px 1fr 84px 76px; gap:12px; align-items:center; margin:9px 0; }
-  .blabel { font-weight:550; }
-  .btrack { background:var(--sunken); border-radius:6px; height:22px; overflow:hidden; }
-  .bfill { height:100%; width:0; background:var(--c); border-radius:6px; transition:width .8s var(--ease); }
-  .bval { text-align:right; font-weight:600; }
-  .bdelta { font-size:12px; text-align:right; color:var(--muted); }
-  .bdelta.good { color:var(--good); } .bdelta.bad { color:var(--bad); }
-  .unit { font-size:12px; color:var(--muted); margin-bottom:6px; }
-  @media (max-width:700px) { .brow { grid-template-columns:110px 1fr 64px; } .bdelta { display:none; } }
-
-  /* ---------- two-column rows ---------- */
-  .two { display:grid; grid-template-columns:1.4fr 1fr; gap:16px; }
-  @media (max-width:900px) { .two { grid-template-columns:1fr; } }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  th { text-align:left; font-weight:600; font-size:11.5px; color:var(--muted); padding:6px 8px; border-bottom:1px solid var(--border); }
-  td { padding:7px 8px; border-bottom:1px solid var(--border); }
-  td.r, th.r { text-align:right; }
-  tr:last-child td { border-bottom:0; }
-  .opdesc { color:var(--muted); font-size:12px; }
-
-  .trace svg { width:100%; height:auto; display:block; }
-  .trace .grid { stroke:var(--border); stroke-width:1; }
-  .trace .axis { fill:var(--muted); font-size:10px; }
-  .trace .line { fill:none; stroke:var(--c-ils); stroke-width:2.2; stroke-linejoin:round; stroke-linecap:round; stroke-dasharray:1; stroke-dashoffset:1; animation:draw 1.3s var(--ease) .1s forwards; }
-  .trace .area { fill:var(--c-ils); opacity:0; animation:fadein .8s ease 1.1s forwards; }
-  @keyframes draw { to { stroke-dashoffset:0; } }
-  @keyframes fadein { to { opacity:.10; } }
-
-  /* ---------- VM fleet ---------- */
-  .fleet { display:grid; gap:7px; }
-  .frow, .fhead { display:grid; grid-template-columns:78px 150px repeat(4,1fr); gap:10px; align-items:center; }
-  .fhead { font-size:11.5px; color:var(--muted); font-weight:600; padding-bottom:4px; border-bottom:1px solid var(--border); }
-  .spd { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text2); }
-  .spd .sb { flex:1; height:6px; background:var(--sunken); border-radius:3px; overflow:hidden; }
-  .spd .sb i { display:block; height:100%; background:var(--accent); border-radius:3px; }
-  .mini { display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--text2); }
-  .mini .mb { flex:1; height:8px; background:var(--sunken); border-radius:4px; overflow:hidden; }
-  .mini .mb i { display:block; height:100%; width:0; background:var(--c); border-radius:4px; transition:width .8s var(--ease); }
-  @media (max-width:900px) { .frow, .fhead { grid-template-columns:60px 110px repeat(4,1fr); font-size:11px; } }
-
-  /* ---------- gantt ---------- */
-  .guide { display:flex; flex-wrap:wrap; gap:16px; font-size:12px; color:var(--text2); margin-bottom:12px; }
-  .guide span { display:inline-flex; align-items:center; gap:6px; }
-  .sw { width:14px; height:10px; border-radius:2px; display:inline-block; background:var(--accent); }
-  .sw.idle { background:var(--idle); border:1px solid var(--bad); }
-  .sw.line { width:2px; height:14px; background:var(--text); border-radius:0; }
-  .sw.dash { width:0; height:14px; border-left:2px dashed var(--muted); background:none; border-radius:0; }
-
-  .gcard { background:var(--panel); border:1px solid var(--border); border-left:4px solid var(--c); border-radius:10px; padding:16px 18px; margin-bottom:14px; content-visibility:auto; contain-intrinsic-size:auto 320px; }
-  .ghead { display:flex; flex-wrap:wrap; justify-content:space-between; gap:6px 16px; margin-bottom:12px; }
-  .gname { font-size:16px; font-weight:650; }
-  .gblurb { color:var(--muted); font-size:12.5px; }
-  .gmeta { display:flex; gap:14px; align-items:baseline; flex-wrap:wrap; font-size:12.5px; color:var(--text2); }
-  .gmeta b { color:var(--text); }
-  .chip { padding:2px 9px; border-radius:99px; font-size:12px; font-weight:600; background:var(--sunken); color:var(--text2); }
-  .chip.good { background:rgba(46,204,113,.15); color:var(--good); } .chip.bad { background:rgba(231,76,60,.15); color:var(--bad); }
-  .grow { display:grid; grid-template-columns:96px 1fr; gap:10px; align-items:center; margin:3px 0; }
-  .glabel { font-size:11.5px; color:var(--text2); white-space:nowrap; }
-  .glabel small { color:var(--muted); }
-  .track { position:relative; height:26px; background:var(--sunken); border-radius:4px; overflow:hidden; }
-  .taxis { position:relative; height:16px; margin-bottom:2px; }
-  .taxis span { position:absolute; transform:translateX(-50%); font-size:10.5px; color:var(--muted); }
-  .bar { position:absolute; top:3px; bottom:3px; background:var(--c); border-radius:3px; font-size:10px; color:#0f141a; font-weight:600; overflow:hidden; padding:0 3px;
-    display:flex; align-items:center; transform-origin:left center; animation:grow .55s var(--ease) both; animation-delay:var(--d,0ms); cursor:default; }
-  .bar:hover { filter:brightness(1.18); outline:1px solid var(--text); z-index:2; }
-  @keyframes grow { from { transform:scaleX(0); opacity:0; } }
-  .gap { position:absolute; top:0; bottom:0; background:var(--idle); display:none; }
-  .show-idle .gap { display:block; }
-  .done-line { position:absolute; top:0; bottom:0; width:2px; background:var(--text); z-index:1; }
-  .ref-line { position:absolute; top:0; bottom:0; width:0; border-left:2px dashed var(--muted); z-index:1; }
-  details.info { margin-top:10px; color:var(--text2); font-size:12.5px; }
-  details.info summary { cursor:pointer; color:var(--muted); }
-  details.info p { margin-top:6px; max-width:90ch; }
-
-  /* ---------- benchmarks ---------- */
-  .bench-status { color:var(--text2); margin-left:12px; font-size:13px; }
-  .bench-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px; }
-  @media (max-width:900px) { .bench-grid { grid-template-columns:1fr; } }
-  .tradeoff svg { width:100%; height:auto; }
-  .tradeoff .pt { fill:var(--c-cost); }
-  .tradeoff .ln { fill:none; stroke:var(--c-cost); stroke-width:2; }
-  .footnote { color:var(--muted); font-size:12px; margin-top:10px; max-width:90ch; }
-
-  .tip { position:fixed; left:0; top:0; pointer-events:none; z-index:50; background:var(--text); color:var(--bg); font-size:12px; padding:5px 9px; border-radius:6px;
-    opacity:0; transition:opacity .12s; white-space:nowrap; will-change:transform; }
-  .tip.on { opacity:.96; }
-
-  @media (prefers-reduced-motion: reduce) { * { animation-duration:.001ms !important; animation-delay:0ms !important; transition-duration:.001ms !important; } html { scroll-behavior:auto; } }
-
-/* ===================== Gen-Z layer ===================== */
-:root{--font-body:"Outfit",system-ui,-apple-system,"Segoe UI",sans-serif;--font-display:"Space Grotesk","Outfit",system-ui,sans-serif;--glass:rgba(27,36,48,.62);--glow:rgba(255,153,0,.5);--accent2:#ffb84d;--c-rate:#a78bfa;--soft-good:rgba(46,204,113,.15);--soft-bad:rgba(231,76,60,.15)}
-@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--glass:rgba(255,255,255,.66);--glow:rgba(255,153,0,.4);--soft-good:rgba(39,174,96,.14);--soft-bad:rgba(211,84,0,.12)}}
-:root[data-theme="dark"]{--bg:#0f141a;--panel:#1b2430;--panel2:#222f3e;--sunken:#121821;--border:#303e50;--border2:#43556d;--text:#f2f4f8;--text2:#9ba3af;--muted:#6c7a89;--accent-ink:#0f141a;--good:#2ecc71;--bad:#e74c3c;--idle:rgba(231,76,60,.18);--c-naive:#e74c3c;--c-heft:#8fa4c4;--c-ils:#00a4e4;--c-cost:#ff9900;--glass:rgba(27,36,48,.62);--glow:rgba(255,153,0,.5);--soft-good:rgba(46,204,113,.15);--soft-bad:rgba(231,76,60,.15);color-scheme:dark}
-:root[data-theme="light"]{--bg:#f8f9fa;--panel:#fff;--panel2:#f1f3f5;--sunken:#e9ecef;--border:#dee2e6;--border2:#ced4da;--text:#1a202c;--text2:#4a5568;--muted:#718096;--accent-ink:#fff;--good:#27ae60;--bad:#d35400;--idle:rgba(211,84,0,.12);--c-naive:#c0392b;--c-heft:#576574;--c-ils:#0082b4;--c-cost:#d35400;--glass:rgba(255,255,255,.66);--glow:rgba(255,153,0,.4);--soft-good:rgba(39,174,96,.14);--soft-bad:rgba(211,84,0,.12);color-scheme:light}
-body{font:15px/1.55 var(--font-body);transition:background .3s,color .3s}
-h1,.section-title,.panel-title,.gname,.eyebrow,.btn,.seg button,th,.step .t,.badge .lab{font-family:var(--font-display)}
-.mono,output,.num,.badge .big,.bval,.bdelta,.step .ms{font-family:var(--font-display);font-variant-numeric:tabular-nums}
-h1{font-size:34px;font-weight:700;letter-spacing:-.03em;line-height:1.1}
-.section-title{font-size:21px;font-weight:700;letter-spacing:-.01em}
-.masthead{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}
-.theme-btn{flex:none;background:var(--panel);color:var(--text);border:1px solid var(--border2);border-radius:99px;width:40px;height:40px;font-size:17px;cursor:pointer;transition:box-shadow .2s,transform .2s}
-.theme-btn:hover{box-shadow:0 0 0 4px var(--glow);transform:rotate(18deg)}
-/* glass controls */
-.panel.controls{background:var(--glass);-webkit-backdrop-filter:blur(16px) saturate(170%);backdrop-filter:blur(16px) saturate(170%);border:1px solid var(--border);border-top:3px solid var(--accent);box-shadow:0 10px 30px rgba(0,0,0,.28)}
-/* dynamic sliders */
-input[type=range]{-webkit-appearance:none;appearance:none;height:24px;background:transparent;cursor:pointer;--pct:0%}
-input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:99px}
-input[type=range]::-webkit-slider-runnable-track{height:6px;border-radius:99px;background:linear-gradient(90deg,var(--accent2),var(--accent) var(--pct),var(--sunken) var(--pct));box-shadow:inset 0 0 0 1px var(--border)}
-input[type=range]::-moz-range-track{height:6px;border-radius:99px;background:var(--sunken);box-shadow:inset 0 0 0 1px var(--border)}
-input[type=range]::-moz-range-progress{height:6px;border-radius:99px;background:linear-gradient(90deg,var(--accent2),var(--accent))}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;margin-top:-7px;border-radius:50%;background:var(--panel);border:3px solid var(--accent);box-shadow:0 2px 6px rgba(0,0,0,.4);transition:transform .18s var(--ease),box-shadow .18s}
-input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--panel);border:3px solid var(--accent);box-shadow:0 2px 6px rgba(0,0,0,.4);transition:transform .18s var(--ease),box-shadow .18s}
-input[type=range]:hover::-webkit-slider-thumb,input[type=range]:focus-visible::-webkit-slider-thumb{transform:scale(1.2);box-shadow:0 0 0 6px var(--glow),0 0 18px var(--glow)}
-input[type=range]:hover::-moz-range-thumb,input[type=range]:focus-visible::-moz-range-thumb{transform:scale(1.2);box-shadow:0 0 0 6px var(--glow),0 0 18px var(--glow)}
-input[type=range]:active::-webkit-slider-thumb{transform:scale(1.08)}
-.field output{font-weight:600;color:var(--accent)}
-/* pipeline */
-.steps{counter-reset:s}
-.step{overflow:visible;background:var(--panel2)}
-.step:not(:last-child)::after{content:"\203A";position:absolute;right:-10px;top:50%;transform:translateY(-50%);color:var(--muted);font-size:16px;z-index:1}
-.step .n{font-weight:600;letter-spacing:.04em;text-transform:uppercase}
-.step.active{box-shadow:0 0 0 3px var(--glow);animation:pulse 1s ease-in-out infinite alternate}
-.step.done{border-color:var(--good)}
-.step.done .n::after{content:" \2713";color:var(--good)}
-.step.done .bar{background:var(--good)}
-.step .ms{opacity:.35;font-weight:600;background:var(--sunken);padding:1px 7px;border-radius:99px}
-.step .ms:empty::before{content:"\2014 ms"}
-.step.done .ms{opacity:1;color:var(--accent)}
-@keyframes pulse{to{box-shadow:0 0 0 6px transparent}}
-@media (max-width:900px){.step:not(:last-child)::after{display:none}}
-/* badges */
-.badge{--tone:var(--muted);border-top-color:var(--tone);position:relative;overflow:hidden}
-.badge.pos{--tone:var(--good)}.badge.neg{--tone:var(--bad)}.badge.zero{--tone:var(--muted)}
-.badge::before{content:"";position:absolute;inset:0;background:radial-gradient(120% 80% at 100% 0,color-mix(in srgb,var(--tone) 14%,transparent),transparent 60%);pointer-events:none}
-.badge .lab{display:flex;justify-content:space-between;gap:8px;align-items:center;font-weight:500}
-.badge .big{font-size:44px;font-weight:700;font-variant-numeric:tabular-nums}
-.ind{font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px;color:var(--tone);background:color-mix(in srgb,var(--tone) 16%,transparent);white-space:nowrap}
-/* segmented switcher + bars */
-.seg button{font-weight:500}.seg button.on{background:var(--accent);color:var(--accent-ink);box-shadow:0 2px 10px var(--glow)}
-.btrack{position:relative;height:24px}
-.bfill{background:linear-gradient(90deg,color-mix(in srgb,var(--c) 45%,transparent),var(--c));box-shadow:0 0 12px color-mix(in srgb,var(--c) 40%,transparent)}
-.bmark{position:absolute;top:-2px;bottom:-2px;width:0;border-left:2px dashed var(--text);opacity:.7;transition:left .8s var(--ease)}
-.bmark[hidden]{display:none}
-.bdelta{font-weight:600;padding:2px 8px;border-radius:99px;background:var(--sunken);font-size:12px}
-.bdelta.good{background:var(--soft-good)}.bdelta.bad{background:var(--soft-bad)}
-/* trace + ops */
-.trace .area{fill:url(#tg)}
-@keyframes fadein{to{opacity:1}}
-.trace .tdot{fill:var(--c-ils);stroke:var(--panel);stroke-width:2}
-.sr{display:flex;align-items:center;justify-content:flex-end;gap:8px}
-.srb{width:54px;height:6px;border-radius:3px;background:var(--sunken);overflow:hidden}
-.srb i{display:block;height:100%;background:linear-gradient(90deg,var(--accent2),var(--good));border-radius:3px}
-/* fleet */
-.fscroll{overflow-x:auto}
-.fleet{min-width:780px}
-.frow,.fhead{grid-template-columns:70px repeat(2,minmax(120px,1.1fr)) repeat(4,minmax(100px,1fr))}
-.fhead span{display:flex;align-items:center;gap:6px}
-.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
-.node{font-weight:700}
-.mini .mb{height:8px}
-.mini .num{min-width:52px;text-align:right;white-space:nowrap}
-.frow{padding:4px 0;border-bottom:1px dashed var(--border)}.frow:last-child{border-bottom:0}
-/* gantt */
-.bar{background:linear-gradient(180deg,color-mix(in srgb,var(--c) 82%,#fff),var(--c));box-shadow:0 1px 0 rgba(255,255,255,.25) inset;border-right:1px solid rgba(0,0,0,.25)}
-.bar.alt{filter:brightness(.86)}
-.gap{background:repeating-linear-gradient(135deg,var(--idle) 0 6px,transparent 6px 12px)}
-.gbody{position:relative;margin-bottom:22px}
-.goverlay{position:absolute;left:106px;right:0;top:0;bottom:0;pointer-events:none}
-.goverlay .done-line{transform:translateX(-1px);box-shadow:0 0 8px var(--glow)}
-.goverlay .flag{position:absolute;top:100%;left:50%;transform:translateX(-50%);margin-top:3px;font-size:11px;font-weight:700;background:var(--text);color:var(--bg);padding:0 6px;border-radius:4px;white-space:nowrap}
-#gantts.hovering .bar:not(.hl){opacity:.45}
-.bar.hl{outline:2px solid var(--text);filter:brightness(1.2);z-index:3}
-.tip{background:var(--panel2);color:var(--text);border:1px solid var(--border2);box-shadow:0 8px 24px rgba(0,0,0,.35);padding:8px 11px;border-radius:8px;line-height:1.45}
-.tip b{display:block;font-family:var(--font-display);font-size:13px;color:var(--accent)}
-.tip span{display:block;font-family:var(--font-display);font-variant-numeric:tabular-nums;color:var(--text2)}
-
-/* ===================== Mercedes-AMG Petronas theme + gradients ===================== */
-:root,:root[data-theme="dark"]{--bg:#07090a;--panel:#12171a;--panel-hi:#1b2428;--panel-lo:#0c1012;--panel2:#1a2226;--sunken:#0a0d0f;--border:#273237;--border2:#3a484e;--text:#eef2f3;--text2:#a9b4b8;--muted:#74838a;--accent:#00d2be;--accent2:#7ff5e6;--accent-ink:#031210;--good:#2de2a6;--bad:#ff4d5e;--idle:rgba(255,77,94,.16);--c-naive:#ff5d6c;--c-heft:#b8bfc4;--c-ils:#00d2be;--c-cost:#ffc24b;--glass:rgba(18,23,26,.6);--glow:rgba(0,210,190,.45);--soft-good:rgba(45,226,166,.15);--soft-bad:rgba(255,77,94,.15);color-scheme:dark}
-@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--bg:#eef1f2;--panel:#fff;--panel-hi:#fff;--panel-lo:#e4e9eb;--panel2:#f0f3f4;--sunken:#e1e6e8;--border:#d3d9dc;--border2:#b9c2c6;--text:#10171a;--text2:#43515a;--muted:#6a7881;--accent:#00a99a;--accent2:#00d2be;--accent-ink:#fff;--good:#0a9d6e;--bad:#d6293e;--idle:rgba(214,41,62,.12);--c-naive:#d6293e;--c-heft:#7b868d;--c-ils:#00a99a;--c-cost:#d98a00;--glass:rgba(255,255,255,.66);--glow:rgba(0,169,154,.35);--soft-good:rgba(10,157,110,.14);--soft-bad:rgba(214,41,62,.12);color-scheme:light}}
-:root[data-theme="light"]{--bg:#eef1f2;--panel:#fff;--panel-hi:#fff;--panel-lo:#e4e9eb;--panel2:#f0f3f4;--sunken:#e1e6e8;--border:#d3d9dc;--border2:#b9c2c6;--text:#10171a;--text2:#43515a;--muted:#6a7881;--accent:#00a99a;--accent2:#00d2be;--accent-ink:#fff;--good:#0a9d6e;--bad:#d6293e;--idle:rgba(214,41,62,.12);--c-naive:#d6293e;--c-heft:#7b868d;--c-ils:#00a99a;--c-cost:#d98a00;--glass:rgba(255,255,255,.66);--glow:rgba(0,169,154,.35);--soft-good:rgba(10,157,110,.14);--soft-bad:rgba(214,41,62,.12);color-scheme:light}
-body{background:radial-gradient(1100px 520px at 88% -8%,color-mix(in srgb,var(--accent) 16%,transparent),transparent 70%),radial-gradient(800px 400px at -5% 10%,color-mix(in srgb,var(--c-heft) 10%,transparent),transparent 70%),repeating-linear-gradient(45deg,rgba(128,140,145,.035) 0 2px,transparent 2px 5px),var(--bg);background-attachment:fixed}
-h1{background:linear-gradient(90deg,var(--text) 10%,var(--c-heft) 45%,var(--accent));-webkit-background-clip:text;background-clip:text;color:transparent}
-.masthead{border-left:0;position:relative}.masthead::before{content:"";position:absolute;left:-16px;top:0;bottom:0;width:4px;border-radius:4px;background:linear-gradient(180deg,var(--accent),var(--c-heft))}
-.masthead>div{padding-left:0}
-.panel{background:linear-gradient(155deg,var(--panel-hi),var(--panel) 55%,var(--panel-lo));box-shadow:0 1px 0 rgba(255,255,255,.05) inset,0 8px 24px rgba(0,0,0,.2)}
-.panel.controls{background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 13%,var(--glass)),var(--glass) 60%)}
-.badge{background:linear-gradient(155deg,var(--panel-hi),var(--panel) 60%,var(--panel-lo));box-shadow:0 8px 24px rgba(0,0,0,.18)}
-.step{background:linear-gradient(160deg,var(--panel-hi),var(--panel2))}
-.step.active{background:linear-gradient(160deg,color-mix(in srgb,var(--accent) 16%,var(--panel-hi)),var(--sunken))}
-.gcard{background:linear-gradient(115deg,color-mix(in srgb,var(--eff,var(--c)) 15%,var(--panel)),var(--panel) 50%,var(--panel-lo))}
-.btn.primary{background:linear-gradient(135deg,var(--accent2),var(--accent))}
-.seg button.on{background:linear-gradient(135deg,var(--accent2),var(--accent))}
-.btn:not(.primary){background:linear-gradient(160deg,var(--panel-hi),var(--panel2))}
-/* effectiveness-driven graphics */
-.efflegend{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);margin:-2px 0 10px}
-.efflegend i{flex:none;width:150px;height:6px;border-radius:3px;background:linear-gradient(90deg,hsl(0 82% 55%),hsl(45 90% 55%),hsl(172 82% 50%))}
-.blabel{display:flex;align-items:center;gap:8px}
-.bfill{background:linear-gradient(90deg,color-mix(in srgb,var(--eff,var(--c)) 35%,transparent),var(--eff,var(--c)));box-shadow:0 0 14px color-mix(in srgb,var(--eff,var(--c)) 45%,transparent)}
-.trace .line{stroke:url(#tl);filter:drop-shadow(0 0 4px var(--glow))}
-.mini .mb i{background:linear-gradient(90deg,color-mix(in srgb,var(--c) 40%,transparent),var(--c))}
-.eff{padding:2px 9px;border-radius:99px;font-weight:600;background:color-mix(in srgb,var(--e) 18%,transparent);color:var(--e)}
-.eff b{color:inherit}
-</style>
+<link rel="preload" href="static/fonts/geist-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="static/style.css">
+<script>
+/* apply the saved or system theme before first paint */
+(function () {
+  var t; try { t = localStorage.getItem("fleet-theme"); } catch (e) {}
+  if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  document.documentElement.dataset.theme = t;
+})();
+</script>
 </head>
 <body>
 <main class="page">
 
-  <header class="masthead"><div>
-    <span class="eyebrow">Cloud Fleet Optimizer</span>
-    <h1>Intelligent Resource &amp; Budget Scheduler</h1>
-    <p class="sub">A complex project consists of interconnected tasks where timing matters. This dashboard decides which tasks run on which virtual instances and when.
-      Press <b>Generate &amp; schedule</b> to build a random workload and watch four strategies tackle it side by side.</p>
-  </div><button class="theme-btn" id="themeBtn" aria-label="Toggle light/dark theme" title="Toggle theme">☾</button></header>
+  <header class="topbar">
+    <div class="brand"><i aria-hidden="true"></i>Cloud Fleet Optimizer</div>
+    <button class="icon-btn" id="themeBtn" type="button" aria-label="Switch theme">
+      <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+    </button>
+  </header>
+
+  <h1>Intelligent resource &amp; budget scheduler</h1>
+  <p class="lede">Decide which task runs on which virtual instance, and when. Generate a random workload to compare four scheduling strategies side by side.</p>
 
   <section class="panel controls" aria-label="Controls">
-    <div class="field"><label for="tasks">Tasks <output id="tasksOut">30</output></label>
-      <input type="range" id="tasks" min="10" max="120" step="1" value="30"></div>
-    <div class="field"><label for="vms">Instances <output id="vmsOut">6</output></label>
-      <input type="range" id="vms" min="2" max="12" step="1" value="6"></div>
-    <div class="field"><label for="beta">Budget priority &beta; <output id="betaOut">0.40</output></label>
-      <input type="range" id="beta" min="0" max="0.95" step="0.05" value="0.4"></div>
-    <div class="field"><label for="seed">Seed (blank = random)</label>
-      <div class="seedrow"><input type="number" id="seed" value="42" placeholder="random"><button class="btn" id="shuffle" title="New random seed and run">Shuffle</button></div></div>
+    <div class="field">
+      <label for="tasks">Tasks <output id="tasksOut" for="tasks">30</output></label>
+      <input type="range" id="tasks" name="tasks" min="10" max="120" step="1" value="30">
+    </div>
+    <div class="field">
+      <label for="vms">Instances <output id="vmsOut" for="vms">6</output></label>
+      <input type="range" id="vms" name="vms" min="2" max="12" step="1" value="6">
+    </div>
+    <div class="field">
+      <label for="beta">Budget priority &beta; <output id="betaOut" for="beta">0.40</output></label>
+      <input type="range" id="beta" name="beta" min="0" max="0.95" step="0.05" value="0.4">
+    </div>
+    <div class="field">
+      <label for="seed">Seed (blank = random)</label>
+      <div class="seedrow">
+        <input class="input" type="number" id="seed" name="seed" value="42" placeholder="Random" min="0" step="1" inputmode="numeric" autocomplete="off">
+        <button class="btn" id="shuffle" type="button" title="Use a new random seed and run">Shuffle</button>
+      </div>
+    </div>
     <div class="actions">
-      <button class="btn primary" id="go">Generate &amp; schedule</button>
-      <button class="btn" id="find" title="Tries seeds until refinement actually beats baseline">Find a run where refinement helps</button>
+      <button class="btn primary" id="go" type="button">Generate &amp; schedule</button>
+      <button class="btn" id="find" type="button" title="Tries seeds until refinement beats the baseline">Find a run where refinement helps</button>
       <label class="check"><input type="checkbox" id="idleToggle" checked> Highlight idle instance time</label>
     </div>
   </section>
 
-  <div id="error" class="error" hidden></div>
+  <div id="error" class="error" role="alert" hidden></div>
+  <p class="sr-only" id="status" role="status"></p>
 
-  <section class="panel" aria-label="Pipeline">
-    <div class="panel-title">Optimization Workflow Stages</div>
-    <ol class="steps" id="steps"></ol>
+  <section aria-labelledby="stagesTitle">
+    <h2 class="panel-title" id="stagesTitle" style="margin-bottom:12px">Optimization workflow stages</h2>
+    <ol class="stages" id="steps"></ol>
+    <details class="how">
+      <summary>What each stage does</summary>
+      <dl id="howList"></dl>
+    </details>
   </section>
 
   <div class="results" id="results" hidden>
 
-    <div class="badges" id="badges"></div>
+    <div class="stats" id="badges"></div>
 
-    <section class="panel">
-      <div class="panel-title">Strategy Comparison</div>
-      <div class="seg" id="metricSeg" role="tablist"></div>
-      <div class="unit" id="metricUnit"></div>
-      <div class="efflegend"><span>Least effective</span><i></i><span>Most effective</span></div>
-      <div id="bars"></div>
+    <section class="panel" aria-labelledby="cmpTitle">
+      <div class="panel-head">
+        <div>
+          <h2 class="panel-title" id="cmpTitle">Strategy comparison</h2>
+          <p class="panel-sub" id="metricUnit"></p>
+        </div>
+        <div class="seg" id="metricSeg" role="group" aria-label="Metric to compare"></div>
+      </div>
+      <div class="bars" id="bars"></div>
+      <p class="footnote">The dashed marker on each bar shows the Priority-Optimized baseline.</p>
     </section>
 
     <div class="two">
-      <section class="panel trace">
-        <div class="panel-title">Refinement progress over time</div>
+      <section class="panel trace" aria-labelledby="traceTitle">
+        <h2 class="panel-title" id="traceTitle">Refinement progress</h2>
+        <p class="panel-sub">Best duration found so far at each search step.</p>
         <div id="traceBox"></div>
-        <div class="footnote" id="traceNote"></div>
+        <p class="footnote" id="traceNote"></p>
       </section>
-      <section class="panel">
-        <div class="panel-title">Adjustment attempts</div>
-        <table id="opsTable"></table>
-        <div class="footnote">Counts cover the improving phases of the search. "Feasible" means all workflow prerequisites remained satisfied.</div>
+      <section class="panel" aria-labelledby="opsTitle">
+        <h2 class="panel-title" id="opsTitle">Adjustment attempts</h2>
+        <p class="panel-sub">Counts cover the improving phases of the search. Feasible means every task prerequisite still held.</p>
+        <div class="tablewrap"><table id="opsTable"></table></div>
       </section>
     </div>
 
-    <div class="section-title">Instance Fleet Performance</div>
-    <p class="section-note">Instance speeds and hourly rates vary. A strong scheduler assigns heavier workloads to high-performance nodes while keeping slower nodes idle when waiting would delay completion.</p>
-    <section class="panel fscroll"><div class="fleet" id="fleet"></div></section>
+    <div class="section-head">
+      <h2 class="section-title">Instance fleet performance</h2>
+      <p class="section-note">Instance speeds and hourly rates vary. A strong schedule gives heavy work to fast instances and leaves slow ones idle when waiting for them would delay completion.</p>
+    </div>
+    <section class="panel"><div class="tablewrap"><table class="fleet" id="fleet"></table></div></section>
 
-    <div class="section-title">Schedule Timelines</div>
+    <div class="section-head">
+      <h2 class="section-title">Schedule timelines</h2>
+    </div>
     <div class="guide">
-      <span><i class="sw"></i> block = assigned task</span>
-      <span><i class="sw idle"></i> red = instance idle time</span>
-      <span><i class="sw line"></i> solid line = completion mark</span>
-      <span><i class="sw dash"></i> dashed line = previous strategy mark</span>
+      <span><i class="sw"></i>Task block</span>
+      <span><i class="sw idle"></i>Instance idle</span>
+      <span><i class="sw line"></i>Completion time</span>
+      <span><i class="sw dash"></i>Comparison strategy's completion</span>
     </div>
     <div id="gantts"></div>
   </div>
 
-  <div class="section-title">Historical Performance Averages</div>
-  <p class="section-note">A single run can be lucky. These figures summarize dozens of randomized scenarios averaged out over multiple test runs.</p>
+  <div class="section-head">
+    <h2 class="section-title">Historical performance averages</h2>
+    <p class="section-note">A single run can be lucky. These figures average many randomized scenarios.</p>
+  </div>
   <section class="panel">
-    <button class="btn" id="benchGo">Run performance benchmarks</button><span class="bench-status" id="benchStatus"></span>
+    <div class="bench-head">
+      <button class="btn" id="benchGo" type="button">Run performance benchmarks</button>
+      <span class="bench-status" id="benchStatus" role="status"></span>
+    </div>
     <div class="bench-grid">
       <div id="benchStatic"></div>
       <div id="benchDynamic"></div>
-      <div class="tradeoff" id="benchTrade" style="grid-column:1 / -1"></div>
+      <div class="tradeoff" id="benchTrade"></div>
     </div>
-    <div class="footnote">Simulated instance pricing and availability patterns are used for comparison purposes.</div>
+    <p class="footnote">Instance pricing, failures and slowdowns are simulated for comparison.</p>
   </section>
 </main>
-<div class="tip" id="tip" role="status"></div>
+<div class="tip" id="tip" aria-hidden="true"></div>
 
-<script>
-"use strict";
-/* =====================================================================
-   Config
-   ===================================================================== */
-const METHODS = [
-  { key:"naive",      name:"Sequential",           color:"--c-naive", ref:null,   blurb:"the baseline approach: distributing sequentially",
-    info:"Processes tasks in dependency order and assigns each to the next available instance in rotation. It lacks priority awareness, leading to high idle times." },
-  { key:"heft",       name:"Priority-Optimized",   color:"--c-heft",  ref:"naive", blurb:"standard priority-based baseline",
-    info:"Ranks tasks by downstream workload, prioritizes bottleneck tasks, and places each on the instance that completes it fastest." },
-  { key:"ils",        name:"Priority + Refined",   color:"--c-ils",   ref:"heft",  blurb:"priority placement with local optimization",
-    info:"Starts from the priority baseline and tests thousands of adjustments (moving or swapping tasks) to accelerate completion. Periodically introduces random shifts to escape dead ends." },
-  { key:"cost_aware", name:"Budget-Optimized",     color:"--c-cost",  ref:"heft",  blurb:"balanced score of speed, budget, and distribution",
-    info:"Applies intelligent adjustments evaluated against a combined score of completion time, budget spent, and workload balance. The budget weight sets the priority trade-off." },
-];
-const STAGES = [
-  ["Build workload",       "Generating random task dependencies and an instance fleet with diverse speeds and rates."],
-  ["Sequential pass",      "Baseline allocation: dealing tasks to instances in order."],
-  ["Rank priorities",      "Scoring tasks based on remaining downstream requirements."],
-  ["Priority placement",   "Allocating tasks by priority to the fastest completing instances."],
-  ["Refinement loop",      "Testing adjustments iteratively to minimize total duration."],
-  ["Budget balancing",     "Evaluating adjustments against speed, cost, and load distribution targets."],
-];
-const OP_DESC = { move:"Reassign one task to a different instance", swap:"Two tasks trade assigned instances", reorder:"Two tasks on the same instance trade places" };
-const BAR_METRICS = {
-  makespan:    { label:"Total Duration", unit:"Time units. Lower finishes sooner.",         get:r=>r.makespan,    fmt:v=>v.toFixed(1) },
-  cost:        { label:"Budget Spent",   unit:"Cost accrued for instance usage. Lower is better.",  get:r=>r.cost,        fmt:v=>"$"+v.toFixed(0) },
-  utilization: { label:"Utilization",  unit:"Average % of total duration instances are active.",  get:r=>r.utilization, fmt:v=>v.toFixed(1)+"%" },
-  loadBalance: { label:"Load Balance", unit:"Distribution spread across instances. Lower is more balanced.", get:r=>r.loadBalance, fmt:v=>v.toFixed(3) },
-};
-const MIN_WAIT_MS = 1300;
-
-/* =====================================================================
-   Tiny helpers
-   ===================================================================== */
-const $ = s => document.querySelector(s);
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const reduceMotion = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
-const pct = (from, to) => from === 0 ? 0 : (to - from) / from * 100;
-const f1 = v => v.toFixed(1);
-/* effectiveness colour: 0 = red (poor) -> amber -> 1 = Petronas teal (best) */
-const effColor = (k, a) => "hsl(" + Math.round(Math.max(0, Math.min(1, k)) * 172) + " 82% 52%" + (a == null ? ")" : " / " + a + ")");
-
-function countTo(el, target, { dec = 1, prefix = "", suffix = "", dur = 800 } = {}) {
-  const text = v => prefix + (Math.abs(v) < 0.05 ? 0 : v).toFixed(dec) + suffix;
-  if (reduceMotion || dur <= 0) { el.textContent = text(target); return; }
-  const t0 = performance.now();
-  (function tick(now) {
-    const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
-    el.textContent = text(target * e);
-    if (k < 1) requestAnimationFrame(tick);
-  })(t0);
-}
-
-/* =====================================================================
-   State
-   ===================================================================== */
-const state = { data:null, metric:"makespan", loading:false, firstBars:true };
-
-/* =====================================================================
-   Controls
-   ===================================================================== */
-[["tasks","tasksOut",v=>v],["vms","vmsOut",v=>v],["beta","betaOut",v=>(+v).toFixed(2)]].forEach(([id,out,fmt]) => {
-  const input = $("#"+id), o = $("#"+out);
-  const sync = () => { o.textContent = fmt(input.value); input.style.setProperty("--pct", ((input.value - input.min) / (input.max - input.min) * 100) + "%"); };
-  input.addEventListener("input", sync); sync();
-});
-$("#go").addEventListener("click", () => generate(false));
-$("#find").addEventListener("click", () => generate(true));
-$("#shuffle").addEventListener("click", () => { $("#seed").value = Math.floor(Math.random() * 10000); generate(false); });
-$("#seed").addEventListener("keydown", e => { if (e.key === "Enter") generate(false); });
-$("#idleToggle").addEventListener("change", e => $("#gantts").classList.toggle("show-idle", e.target.checked));
-
-function showError(msg) { const el = $("#error"); el.innerHTML = msg; el.hidden = false; }
-function hideError() { $("#error").hidden = true; }
-
-/* =====================================================================
-   Pipeline strip
-   ===================================================================== */
-function buildSteps() {
-  $("#steps").innerHTML = STAGES.map(([label, desc], i) =>
-    '<li class="step" data-i="'+i+'"><span class="n">Stage '+(i+1)+'</span><span class="ms mono"></span>' +
-    '<div class="t">'+label+'</div><div class="d">'+desc+'</div><div class="bar"></div></li>').join("");
-}
-function stepEls() { return Array.from(document.querySelectorAll(".step")); }
-
-let spinTimer = null;
-function startSpin() {
-  stepEls().forEach(s => { s.classList.remove("done","active"); s.querySelector(".bar").style.width = "0"; s.querySelector(".ms").textContent = ""; });
-  let i = 0; const els = stepEls();
-  const advance = () => { els.forEach((s, k) => s.classList.toggle("active", k === i % els.length)); i++; };
-  advance(); spinTimer = setInterval(advance, 260);
-}
-function stopSpin() { clearInterval(spinTimer); stepEls().forEach(s => s.classList.remove("active")); }
-
-async function revealStages(stages, budgetMs) {
-  stopSpin();
-  const els = stepEls();
-  const slowest = Math.max(...stages.map(s => s.ms), 0.001);
-  const gap = Math.max(40, Math.min(220, budgetMs / Math.max(stages.length, 1)));
-  for (let i = 0; i < els.length; i++) {
-    const st = stages.find(s => s.label === STAGES[i][0]);
-    els[i].classList.add("active");
-    await sleep(reduceMotion ? 0 : gap * 0.5);
-    els[i].classList.remove("active"); els[i].classList.add("done");
-    if (st) {
-      els[i].querySelector(".ms").textContent = st.ms < 10 ? st.ms.toFixed(1) + " ms" : Math.round(st.ms) + " ms";
-      els[i].querySelector(".bar").style.width = Math.max(4, st.ms / slowest * 100) + "%";
-    }
-    await sleep(reduceMotion ? 0 : gap * 0.5);
-  }
-}
-
-/* =====================================================================
-   Main action
-   ===================================================================== */
-async function generate(find) {
-  if (state.loading) return;
-  state.loading = true; hideError();
-  const buttons = [$("#go"), $("#find"), $("#shuffle")];
-  buttons.forEach(b => b.disabled = true);
-  $("#results").classList.add("loading");
-  startSpin();
-  const t0 = performance.now();
-  try {
-    const qs = new URLSearchParams({ tasks:$("#tasks").value, vms:$("#vms").value, beta:$("#beta").value, seed:$("#seed").value.trim() });
-    if (find) qs.set("find", "1");
-    const res = await fetch("/api/schedule?" + qs);
-    if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || ("HTTP " + res.status)); }
-    const data = await res.json();
-    const elapsed = performance.now() - t0;
-    await revealStages(data.stages, Math.max(MIN_WAIT_MS - elapsed, 600));
-    state.data = data;
-    $("#seed").value = data.instance.seed;
-    renderAll(data);
-  } catch (err) {
-    stopSpin();
-    showError("<b>Connection Notice.</b> " + String(err.message || err) +
-      "<br>Ensure the backend service is running locally.");
-  } finally {
-    state.loading = false;
-    buttons.forEach(b => b.disabled = false);
-    $("#results").classList.remove("loading");
-  }
-}
-
-/* =====================================================================
-   Rendering
-   ===================================================================== */
-function renderAll(d) {
-  $("#results").hidden = false;
-  renderBadges(d);
-  renderBars(d, true);
-  renderTrace(d);
-  renderOps(d);
-  renderFleet(d);
-  renderGantts(d);
-}
-
-/* ---------- headline badges ---------- */
-function renderBadges(d) {
-  const ilsGain = -pct(d.heft.makespan, d.ils.makespan);
-  const costChg = pct(d.heft.cost, d.cost_aware.cost);
-  const msChg   = pct(d.heft.makespan, d.cost_aware.makespan);
-  const heftGain = -pct(d.naive.makespan, d.heft.makespan);
-
-  let ilsNote;
-  if (ilsGain < 0.05) {
-    ilsNote = "Baseline was already optimal for this workload configuration. Try searching for scenarios where refinement helps.";
-    if (d.scan && !d.scan.found) ilsNote = "No alternative optimal workload turned up in " + d.scan.tries + " attempts.";
-  } else {
-    ilsNote = "Refinement optimization successfully accelerated completion versus the baseline.";
-  }
-
-  const badges = [
-    { c:"--c-ils", lab:"Refined vs Baseline (Duration)", val:ilsGain, dec:1, suffix:"%", cls:ilsGain >= 0.05 ? "pos" : "zero", note:ilsNote, sign:true },
-    { c:"--c-cost", lab:"Budget-Optimized vs Baseline (Cost)", val:costChg, dec:1, suffix:"%", cls:costChg < -0.05 ? "pos" : costChg > 0.05 ? "neg" : "zero", sign:true,
-      note:"Duration changed by <b>" + (msChg >= 0 ? "+" : "") + msChg.toFixed(1) + "%</b> based on priority weighting." },
-    { c:"--c-heft", lab:"Priority vs Sequential (Duration)", val:heftGain, dec:1, suffix:"%", cls:heftGain > 0.05 ? "pos" : "zero", sign:true,
-      note:"Efficiency improvement achieved through intelligent resource distribution." },
-  ];
-  const box = $("#badges");
-  box.innerHTML = badges.map((b, i) =>
-    '<div class="badge '+b.cls+'" style="--c:var('+b.c+')"><div class="lab"><span>'+b.lab+'</span><span class="ind">'+({pos:"\u25B2 Positive",neg:"\u25BC Negative",zero:"\u25CF Neutral"})[b.cls]+'</span></div><div class="big num '+b.cls+'" data-i="'+i+'">0.0%</div><div class="note">'+b.note+'</div></div>').join("");
-  badges.forEach((b, i) => {
-    const el = box.querySelector('[data-i="'+i+'"]');
-    countTo(el, b.val, { dec:b.dec, suffix:b.suffix, prefix:"" });
-    if (b.val > 0.05) setTimeout(() => { el.textContent = "+" + b.val.toFixed(b.dec) + b.suffix; }, reduceMotion ? 0 : 850);
-  });
-}
-
-/* ---------- comparison bars ---------- */
-function buildBars() {
-  $("#metricSeg").innerHTML = Object.entries(BAR_METRICS).map(([k, m]) =>
-    '<button data-k="'+k+'" class="'+(k === state.metric ? "on" : "")+'">'+m.label+'</button>').join("");
-  $("#bars").innerHTML = METHODS.map(m =>
-    '<div class="brow" data-k="'+m.key+'"><span class="blabel"><i class="dot" style="background:var('+m.color+')"></i>'+m.name+'</span>' +
-    '<div class="btrack"><div class="bfill" style="--c:var('+m.color+')"></div><i class="bmark"></i></div><span class="bval num"></span><span class="bdelta num"></span></div>').join("");
-  $("#metricSeg").addEventListener("click", e => {
-    const b = e.target.closest("button[data-k]"); if (!b) return;
-    state.metric = b.dataset.k;
-    document.querySelectorAll("#metricSeg button").forEach(x => x.classList.toggle("on", x === b));
-    if (state.data) renderBars(state.data, false);
-  });
-}
-function renderBars(d, fresh) {
-  const spec = BAR_METRICS[state.metric];
-  $("#metricUnit").textContent = spec.unit;
-  const vals = METHODS.map(m => spec.get(d[m.key]));
-  const max = Math.max(...vals, 1e-9);
-  const lowerBetter = state.metric !== "utilization";
-  const base = spec.get(d.heft);
-  const lo = Math.min(...vals), hi = Math.max(...vals);
-  const scores = vals.map(v => hi === lo ? .65 : (lowerBetter ? hi - v : v - lo) / (hi - lo));
-  const apply = () => METHODS.forEach((m, i) => {
-    const row = document.querySelector('.brow[data-k="'+m.key+'"]');
-    const bf = row.querySelector(".bfill"); bf.style.width = (vals[i] / max * 100) + "%"; bf.style.setProperty("--eff", effColor(scores[i]));
-    const mk = row.querySelector(".bmark"); mk.style.left = (base / max * 100) + "%"; mk.hidden = m.key === "heft";
-    row.querySelector(".bval").textContent = spec.fmt(vals[i]);
-    const dl = row.querySelector(".bdelta");
-    if (m.key === "heft") { dl.textContent = "baseline"; dl.className = "bdelta num"; return; }
-    const ch = pct(base, vals[i]);
-    dl.textContent = (ch >= 0 ? "+" : "") + ch.toFixed(1) + "%";
-    const better = lowerBetter ? ch < -0.05 : ch > 0.05, worse = lowerBetter ? ch > 0.05 : ch < -0.05;
-    dl.className = "bdelta num " + (better ? "good" : worse ? "bad" : "");
-  });
-  if (fresh) {
-    document.querySelectorAll(".bfill").forEach(f => f.style.width = "0");
-    requestAnimationFrame(() => requestAnimationFrame(() => renderBars(state.data || d, false)));
-  } else apply();
-}
-
-/* ---------- convergence trace ---------- */
-function renderTrace(d) {
-  const t = d.trace, W = 620, H = 200, pl = 48, pr = 14, pt = 14, pb = 30;
-  let lo = Math.min(...t), hi = Math.max(...t);
-  if (hi - lo < 1e-9) { lo -= 1; hi += 1; } else { const p = (hi - lo) * 0.15; lo -= p; hi += p; }
-  const x = i => pl + (t.length > 1 ? i / (t.length - 1) : 0) * (W - pl - pr);
-  const y = v => pt + (1 - (v - lo) / (hi - lo)) * (H - pt - pb);
-  const pts = t.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1));
-  const line = "M" + pts.join(" L");
-  const area = line + " L" + x(t.length - 1).toFixed(1) + "," + (H - pb) + " L" + pl + "," + (H - pb) + " Z";
-  const ticks = [0, 0.5, 1].map(k => { const v = lo + (hi - lo) * (1 - k); const yy = pt + k * (H - pt - pb);
-    return '<line class="grid" x1="'+pl+'" x2="'+(W-pr)+'" y1="'+yy+'" y2="'+yy+'"/><text class="axis" x="'+(pl-6)+'" y="'+(yy+3)+'" text-anchor="end">'+v.toFixed(1)+'</text>'; }).join("");
-  $("#traceBox").innerHTML =
-    '<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Optimization progress over time">' + ticks +
-    '<defs><linearGradient id="tg" gradientUnits="userSpaceOnUse" x1="0" y1="'+pt+'" x2="0" y2="'+(H-pb)+'"><stop offset="0" stop-color="hsl(0 82% 55%)" stop-opacity=".55"/><stop offset=".5" stop-color="hsl(45 90% 55%)" stop-opacity=".3"/><stop offset="1" stop-color="hsl(172 82% 50%)" stop-opacity=".1"/></linearGradient><linearGradient id="tl" gradientUnits="userSpaceOnUse" x1="0" y1="'+pt+'" x2="0" y2="'+(H-pb)+'"><stop offset="0" stop-color="hsl(0 82% 58%)"/><stop offset=".5" stop-color="hsl(45 90% 58%)"/><stop offset="1" stop-color="hsl(172 82% 52%)"/></linearGradient></defs><path class="area" d="'+area+'"/><path class="line" pathLength="1" d="'+line+'"/><circle class="tdot" style="fill:'+effColor(1-(t[t.length-1]-lo)/(hi-lo))+'" r="4.5" cx="'+x(t.length-1).toFixed(1)+'" cy="'+y(t[t.length-1]).toFixed(1)+'"/>' +
-    '<text class="axis" x="'+pl+'" y="'+(H-8)+'">0</text><text class="axis" x="'+(W-pr)+'" y="'+(H-8)+'" text-anchor="end">'+d.traceLength.toLocaleString()+' steps</text></svg>';
-  const gain = -pct(d.heft.makespan, d.ils.makespan);
-  $("#traceNote").textContent = gain < 0.05
-    ? "Stable progression indicates baseline was already highly optimized."
-    : "Duration decreased significantly during refinement steps.";
-}
-
-/* ---------- operator table ---------- */
-function renderOps(d) {
-  const rates = d.operators.map(o => o.attempts ? o.accepted / o.attempts * 100 : 0), mx = Math.max(...rates, 1e-9);
-  $("#opsTable").innerHTML =
-    '<thead><tr><th>Action Type</th><th class="r">Tested</th><th class="r">Feasible</th><th class="r">Improved</th><th class="r">Success Rate</th></tr></thead><tbody>' +
-    d.operators.map((o, i) => '<tr><td><b>' + o.name + '</b><div class="opdesc">' + (OP_DESC[o.name] || "") + '</div></td>' +
-      '<td class="r num">'+o.attempts+'</td><td class="r num">'+o.feasible+'</td><td class="r num">'+o.accepted+'</td>' +
-      '<td class="r"><div class="sr"><span class="num">'+rates[i].toFixed(1)+'%</span><span class="srb"><i style="width:'+(rates[i]/mx*100)+'%;background:linear-gradient(90deg,'+effColor(rates[i]/mx*.4,.7)+','+effColor(rates[i]/mx)+')"></i></span></div></td></tr>').join("") + '</tbody>';
-}
-
-/* ---------- VM fleet ---------- */
-function renderFleet(d) {
-  const mxS = Math.max(...d.vms.map(v => v.speed)), mxR = Math.max(...d.vms.map(v => v.cost_per_hour));
-  const bar = (c, w, txt) => '<span class="mini" style="--c:' + c + '"><span class="mb"><i data-w="' + w + '"></i></span><span class="num">' + txt + '</span></span>';
-  const head = '<div class="fhead"><span>Instance</span><span>Speed</span><span>Hourly rate</span>' + METHODS.map(m => '<span><i class="dot" style="background:var(' + m.color + ')"></i>' + m.name + '</span>').join("") + '</div>';
-  const rows = d.vms.map((v, i) => '<div class="frow"><span class="num node">Node ' + v.id + '</span>' +
-    bar('var(--accent)', v.speed / mxS * 100, '\u00D7' + v.speed.toFixed(1)) + bar('var(--c-rate)', v.cost_per_hour / mxR * 100, '$' + v.cost_per_hour.toFixed(2) + '/hr') +
-    METHODS.map(m => bar(effColor(d[m.key].vmUtil[i]), d[m.key].vmUtil[i] * 100, d[m.key].vmTasks[i] + ' tasks')).join("") + '</div>').join("");
-  const box = $("#fleet");
-  box.innerHTML = head + rows;
-  requestAnimationFrame(() => requestAnimationFrame(() => box.querySelectorAll("i[data-w]").forEach(el => el.style.width = el.dataset.w + "%")));
-}
-
-/* ---------- gantt stack ---------- */
-function niceStep(max) {
-  const raw = max / 6, mag = Math.pow(10, Math.floor(Math.log10(raw))), n = raw / mag;
-  return (n < 1.5 ? 1 : n < 3 ? 2 : n < 7 ? 5 : 10) * mag;
-}
-function idleGaps(tasks, makespan) {
-  const sorted = tasks.slice().sort((a, b) => a.start - b.start);
-  const gaps = []; let cursor = 0;
-  sorted.forEach(t => { if (t.start > cursor + 1e-6) gaps.push([cursor, t.start]); cursor = Math.max(cursor, t.end); });
-  if (makespan > cursor + 1e-6) gaps.push([cursor, makespan]);
-  return gaps;
-}
-function renderGantts(d) {
-  const timeMax = Math.max(...METHODS.map(m => d[m.key].makespan)) * 1.02;
-  const step = niceStep(timeMax);
-  const ticks = []; for (let t = 0; t <= timeMax; t += step) ticks.push(t);
-  const pos = v => (v / timeMax * 100);
-
-  const html = METHODS.map(m => {
-    const r = d[m.key], ref = m.ref ? d[m.ref] : null, refM = METHODS.find(x => x.key === m.ref);
-    const mk = METHODS.map(x => d[x.key].makespan), mlo = Math.min(...mk), mhi = Math.max(...mk), eff = mhi === mlo ? .65 : (mhi - r.makespan) / (mhi - mlo);
-    let chip = "";
-    if (ref) {
-      const ch = pct(ref.makespan, r.makespan);
-      const cls = ch < -0.05 ? "good" : ch > 0.05 ? "bad" : "";
-      chip = '<span class="chip '+cls+'">' + (Math.abs(ch) < 0.05 ? "equivalent to " : (ch > 0 ? "+" : "") + ch.toFixed(1) + "% vs ") + refM.name + '</span>';
-    }
-    const axis = '<div class="grow"><span></span><div class="taxis">' + ticks.map(t => '<span class="num" style="left:'+pos(t)+'%">'+(Number.isInteger(t) ? t : t.toFixed(1))+'</span>').join("") + '</div></div>';
-    const rows = d.vms.map(v => {
-      const mine = r.tasks.filter(t => t.vm === v.id);
-      const idle = idleGaps(mine, r.makespan).map(([a, b]) => '<div class="gap" style="left:'+pos(a)+'%;width:'+pos(b - a)+'%"></div>').join("");
-      const bars = mine.map((t, k) => {
-        const w = pos(t.end - t.start);
-        return '<div class="bar'+(k % 2 ? " alt" : "")+'" data-id="'+t.id+'" style="left:'+pos(t.start)+'%;width:'+w+'%;--d:'+Math.min(k * 25, 500)+'ms" data-tip="Task '+t.id+' \u00B7 Node '+v.id+' \u00B7 '+t.start.toFixed(1)+'\u2013'+t.end.toFixed(1)+' \u00B7 $'+t.cost.toFixed(1)+'">' + (w > 3.2 ? t.id : "") + '</div>';
-      }).join("");
-      return '<div class="grow"><span class="glabel">Node '+v.id+' <small>\u00D7'+v.speed.toFixed(1)+'</small></span><div class="track">'+idle+bars+'</div></div>';
-    }).join("");
-    return '<article class="gcard" style="--c:var('+m.color+');--eff:'+effColor(eff)+'"><div class="ghead"><div><div class="gname">'+m.name+'</div><div class="gblurb">'+m.blurb+'</div></div>' +
-      '<div class="gmeta"><span class="eff" style="--e:'+effColor(eff)+'">score <b class="num">'+Math.round(eff*100)+'</b></span><span>duration <b class="num">'+r.makespan.toFixed(1)+'</b></span><span>cost <b class="num">$'+r.cost.toFixed(0)+'</b></span><span>active <b class="num">'+r.utilization.toFixed(1)+'%</b></span>'+chip+'</div></div>' +
-      axis + '<div class="gbody">' + rows + '<div class="goverlay"><div class="done-line" style="left:'+pos(r.makespan)+'%"><span class="flag num">'+r.makespan.toFixed(1)+'</span></div>' + (ref ? '<div class="ref-line" style="left:'+pos(ref.makespan)+'%"></div>' : '') + '</div></div><details class="info"><summary>Strategy details</summary><p>'+m.info+'</p></details></article>';
-  }).join("");
-  const box = $("#gantts");
-  box.innerHTML = html;
-  box.classList.toggle("show-idle", $("#idleToggle").checked);
-}
-
-/* ---------- shared tooltip + cross-strategy task highlight ---------- */
-const tip = $("#tip");
-let hlId = null;
-function setHl(id) {
-  if (id === hlId) return; hlId = id;
-  const g = $("#gantts");
-  g.querySelectorAll(".bar.hl").forEach(b => b.classList.remove("hl"));
-  g.classList.toggle("hovering", id !== null);
-  if (id !== null) g.querySelectorAll('.bar[data-id="' + id + '"]').forEach(b => b.classList.add("hl"));
-}
-document.addEventListener("pointermove", e => {
-  const bar = e.target.closest && e.target.closest(".bar[data-tip]");
-  if (!bar) { tip.classList.remove("on"); setHl(null); return; }
-  const [a, ...rest] = bar.dataset.tip.split(" \u00B7 ");
-  tip.innerHTML = "<b>" + a + "</b>" + rest.map(x => "<span>" + x + "</span>").join("");
-  const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8), y = Math.min(e.clientY + 14, innerHeight - tip.offsetHeight - 8);
-  tip.style.transform = "translate(" + x + "px," + y + "px)";
-  tip.classList.add("on"); setHl(bar.dataset.id);
-});
-document.addEventListener("mouseout", e => { if (!e.relatedTarget) { tip.classList.remove("on"); setHl(null); } });
-
-/* =====================================================================
-   Averaged benchmarks
-   ===================================================================== */
-const STATIC_NAMES = { heft:"Priority-Optimized", ls:"Refined (Standard)", cost_aware:"Budget-Optimized" };
-const DYN_NAMES = { selective:"Selective Repair", naive:"Sequential Re-run" };
-
-$("#benchGo").addEventListener("click", async () => {
-  const btn = $("#benchGo"), status = $("#benchStatus");
-  btn.disabled = true;
-  const get = async path => { const r = await fetch(path); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); };
-  try {
-    status.textContent = "Analyzing static configurations…";
-    const s = await get("/api/benchmark/static");
-    $("#benchStatic").innerHTML = '<div class="panel-title">Static Comparison (' + s.trials + ' trials)</div>' +
-      '<table><thead><tr><th>Strategy</th><th class="r">Duration</th><th class="r">Cost</th><th class="r">Active %</th><th class="r">Balance</th></tr></thead><tbody>' +
-      s.methods.map(m => '<tr><td>'+STATIC_NAMES[m.key]+'</td><td class="r num">'+m.makespan.toFixed(2)+'</td><td class="r num">$'+m.cost.toFixed(1)+'</td><td class="r num">'+m.utilization.toFixed(1)+'</td><td class="r num">'+m.loadBalance.toFixed(3)+'</td></tr>').join("") + '</tbody></table>';
-
-    status.textContent = "Simulating instance recovery…";
-    const dy = await get("/api/benchmark/dynamic");
-    $("#benchDynamic").innerHTML = '<div class="panel-title">Instance Disruption Recovery (' + dy.trials + ' trials)</div>' +
-      '<table><thead><tr><th>Approach</th><th class="r">Tasks Touched</th><th class="r">Recovery Time</th><th class="r">Stability %</th><th class="r">Duration</th></tr></thead><tbody>' +
-      dy.methods.map(m => '<tr><td>'+DYN_NAMES[m.key]+'</td><td class="r num">'+m.tasksTouched.toFixed(1)+'</td><td class="r num">'+m.repairMs.toFixed(3)+'</td><td class="r num">'+m.stability.toFixed(1)+'</td><td class="r num">'+m.makespan.toFixed(1)+'</td></tr>').join("") + '</tbody></table>';
-
-    status.textContent = "Calculating budget trade-offs…";
-    const t = await get("/api/benchmark/tradeoff");
-    renderTradeoff(t);
-    status.textContent = "Analysis complete.";
-  } catch (err) {
-    status.textContent = "Failed: " + err.message;
-  } finally { btn.disabled = false; }
-});
-
-function renderTradeoff(pts) {
-  const W = 640, H = 220, pl = 54, pr = 24, pt = 16, pb = 34;
-  const ms = pts.map(p => p.makespan), cs = pts.map(p => p.cost);
-  const x0 = Math.min(...ms), x1 = Math.max(...ms), y0 = Math.min(...cs), y1 = Math.max(...cs);
-  const x = v => pl + (x1 === x0 ? 0 : (v - x0) / (x1 - x0)) * (W - pl - pr);
-  const y = v => pt + (1 - (y1 === y0 ? 0 : (v - y0) / (y1 - y0))) * (H - pt - pb);
-  $("#benchTrade").innerHTML = '<div class="panel-title">Cost versus Duration Trade-off across Priority Weightings</div>' +
-    '<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Cost versus duration trade-off">' +
-    '<line stroke="var(--border)" x1="'+pl+'" x2="'+pl+'" y1="'+pt+'" y2="'+(H-pb)+'"/><line stroke="var(--border)" x1="'+pl+'" x2="'+(W-pr)+'" y1="'+(H-pb)+'" y2="'+(H-pb)+'"/>' +
-    '<polyline class="ln" points="'+pts.map(p => x(p.makespan)+","+y(p.cost)).join(" ")+'"/>' +
-    pts.map(p => '<circle class="pt" r="4" cx="'+x(p.makespan)+'" cy="'+y(p.cost)+'"/><text fill="var(--muted)" font-size="10" x="'+(x(p.makespan)+7)+'" y="'+(y(p.cost)-7)+'">weight='+p.beta.toFixed(2)+'</text>').join("") +
-    '<text fill="var(--muted)" font-size="10" x="'+(pl-6)+'" y="'+(pt+4)+'" text-anchor="end">$'+y1.toFixed(0)+'</text><text fill="var(--muted)" font-size="10" x="'+(pl-6)+'" y="'+(H-pb+4)+'" text-anchor="end">$'+y0.toFixed(0)+'</text>' +
-    '<text fill="var(--muted)" font-size="10" x="'+pl+'" y="'+(H-12)+'">'+x0.toFixed(0)+'</text><text fill="var(--muted)" font-size="10" x="'+(W-pr)+'" y="'+(H-12)+'" text-anchor="end">'+x1.toFixed(0)+' duration →</text></svg>';
-}
-
-/* =====================================================================
-   Boot
-   ===================================================================== */
-(function theme() {
-  const root = document.documentElement, btn = $("#themeBtn");
-  const cur = () => root.dataset.theme || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
-  const paint = () => { btn.textContent = cur() === "dark" ? "\u2600" : "\u263E"; };
-  try { const t = localStorage.getItem("fleet-theme"); if (t) root.dataset.theme = t; } catch (e) {}
-  btn.addEventListener("click", () => { const n = cur() === "dark" ? "light" : "dark"; root.dataset.theme = n; try { localStorage.setItem("fleet-theme", n); } catch (e) {} paint(); });
-  paint();
-})();
-buildSteps();
-buildBars();
-generate(false);
-</script>
+<script src="static/app.js"></script>
 </body>
 </html>
