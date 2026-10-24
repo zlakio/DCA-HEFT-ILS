@@ -150,7 +150,10 @@ DCA-HEFT-ILS/
 ├── tests/                   # One test module per core component
 ├── plots/                   # Generated figures
 ├── server.py                # Flask bridge between core/ and the dashboard
+<<<<<<< HEAD
 ├── static/                  # Shared dashboard assets: style.css, app.js, demo.js (demo-mode data), self-hosted Geist font
+=======
+>>>>>>> c91dcd74e5078970b1a7dfa62767f1529088dba9
 ├── dashboard.html           # Interactive dashboard (needs server.py)
 ├── index.html               # Static demo page (simulated data)
 └── README.md
