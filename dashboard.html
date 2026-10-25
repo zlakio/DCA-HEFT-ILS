@@ -55,6 +55,7 @@
     <div class="actions">
       <button class="btn primary" id="go" type="button">Generate &amp; schedule</button>
       <button class="btn" id="find" type="button" title="Tries seeds until refinement beats the baseline">Find a run where refinement helps</button>
+      <button class="btn" id="copyLink" type="button" title="Copy a link that reopens this exact run">Copy link</button>
       <label class="check"><input type="checkbox" id="idleToggle" checked> Highlight idle instance time</label>
     </div>
   </section>
@@ -107,16 +108,63 @@
     </div>
     <section class="panel"><div class="tablewrap"><table class="fleet" id="fleet"></table></div></section>
 
-    <div class="section-head">
+    <div class="section-head tools-head">
       <h2 class="section-title">Schedule timelines</h2>
+      <div class="tools">
+        <div class="seg" id="cardToggles" role="group" aria-label="Strategies to show"></div>
+        <button class="btn" id="exportCsv" type="button">Download CSV</button>
+        <button class="btn" id="exportPng" type="button">Download image</button>
+      </div>
     </div>
     <div class="guide">
       <span><i class="sw"></i>Task block</span>
       <span><i class="sw idle"></i>Instance idle</span>
       <span><i class="sw line"></i>Completion time</span>
       <span><i class="sw dash"></i>Comparison strategy's completion</span>
+      <span id="guideRel" hidden><i class="sw rel"></i>Prerequisite or dependent of the task you point at</span>
     </div>
-    <div id="gantts"></div>
+    <div id="gantts" data-hl></div>
+
+    <div class="section-head">
+      <h2 class="section-title">What if an instance fails?</h2>
+      <p class="section-note">Fail or slow down one instance partway through a run. Selective repair re-plans only the tasks that are affected and keeps the rest of the schedule where it was.</p>
+    </div>
+    <section class="panel" aria-labelledby="repairTitle">
+      <h3 class="sr-only" id="repairTitle">Instance failure simulation</h3>
+      <p class="panel-sub" id="repairOffline" hidden>This simulation runs the real scheduler, so it needs the Python backend. Start it with <code>python server.py</code> and open the dashboard from there.</p>
+      <div id="repairLive">
+        <div class="repair-controls">
+          <div class="field">
+            <label for="evType">Event</label>
+            <select class="input" id="evType">
+              <option value="failure">Instance fails</option>
+              <option value="slowdown">Instance slows down</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="evVm">Instance</label>
+            <select class="input" id="evVm"></select>
+          </div>
+          <div class="field">
+            <label for="evAt">When, as % of the run <output id="evAtOut" for="evAt">40%</output></label>
+            <input type="range" id="evAt" min="5" max="90" step="5" value="40">
+          </div>
+          <div class="field" id="evFactorField" hidden>
+            <label for="evFactor">New speed <output id="evFactorOut" for="evFactor">&times;0.50</output></label>
+            <input type="range" id="evFactor" min="0.1" max="0.9" step="0.05" value="0.5">
+          </div>
+          <div class="field">
+            <label for="evStrategy">Schedule to disrupt</label>
+            <select class="input" id="evStrategy"></select>
+          </div>
+          <div class="field">
+            <button class="btn primary" id="evGo" type="button">Simulate</button>
+          </div>
+        </div>
+        <p class="footnote" id="repairNote" role="status" hidden></p>
+        <div id="repairResult" hidden></div>
+      </div>
+    </section>
   </div>
 
   <div class="section-head">
@@ -128,6 +176,7 @@
       <button class="btn" id="benchGo" type="button">Run performance benchmarks</button>
       <span class="bench-status" id="benchStatus" role="status"></span>
     </div>
+    <div class="progress" id="benchProg" role="progressbar" aria-label="Benchmark progress" aria-valuemin="0" aria-valuemax="3" aria-valuenow="0" hidden><i></i></div>
     <div class="bench-grid">
       <div id="benchStatic"></div>
       <div id="benchDynamic"></div>

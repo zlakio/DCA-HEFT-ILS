@@ -1,8 +1,12 @@
 """Bridge between the Python scheduler (core/) and the browser dashboards.
 
 Run:  python server.py
-Open: http://localhost:5000          (new dashboard  -> dashboard.html)
-      http://localhost:5000/classic  (old page       -> frontend.html)
+Open: http://localhost:5000          (dashboard -> dashboard.html)
+      http://localhost:5000/classic  (old page -> frontend.html, if you still have it)
+
+API:  /api/schedule          one workload scheduled four ways (+ task dependencies)
+      /api/event             fail or slow down an instance mid-run and repair it
+      /api/benchmark/...     averaged results (cached, they are deterministic)
 
 Why the lock?  core/ seeds Python's *global* random generator, so two requests
 running at once would corrupt each other's "reproducible" results.  Every heavy
@@ -17,7 +21,12 @@ import time
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from core.benchmark import run_dynamic_benchmark, run_static_benchmark
+from core.benchmark import (
+    _schedule_stability,
+    naive_full_reschedule,
+    run_dynamic_benchmark,
+    run_static_benchmark,
+)
 from core.cost_model import (
     compute_average_utilization,
     compute_load_balance_index,
@@ -25,6 +34,7 @@ from core.cost_model import (
     compute_task_cost,
 )
 from core.dag_generator import generate_random_dag
+from core.dynamic_events import VMFailureEvent, VMSlowdownEvent
 from core.heft_engine import (
     _earliest_finish_time_on_vm,
     compute_upward_ranks,
@@ -37,7 +47,8 @@ from core.local_search import (
     is_feasible,
     local_search,
 )
-from core.models import Assignment, Schedule
+from core.models import VM, Assignment, Schedule
+from core.selective_reopt import handle_event
 from core.vm_generator import generate_vm_pool
 
 app = Flask(__name__)
@@ -45,6 +56,26 @@ LOCK = threading.Lock()
 
 MAX_TASKS, MAX_VMS = 120, 16
 TRACE_POINTS = 120
+STRATEGIES = ("naive", "heft", "ils", "cost_aware")
+
+# Benchmarks are deterministic for a given (trials, seed), so remember them.
+# Always read and written while holding LOCK.
+_BENCH_CACHE = {}
+_BENCH_CACHE_MAX = 32
+
+
+def cached(key, compute):
+    """Return the stored result for `key`, computing it once. Call under LOCK."""
+    if key not in _BENCH_CACHE:
+        if len(_BENCH_CACHE) >= _BENCH_CACHE_MAX:
+            _BENCH_CACHE.clear()
+        _BENCH_CACHE[key] = compute()
+    return _BENCH_CACHE[key]
+
+
+def int_arg(name, default, lo, hi):
+    """Read an integer query parameter, clamped to [lo, hi]."""
+    return max(lo, min(hi, int(request.args.get(name, default))))
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +231,8 @@ def run_pipeline(num_tasks, num_vms, seed, beta, iterations):
             "iterations": iterations,
         },
         "vms": vms_to_json(vms),
+        # [predecessor, successor] pairs, so the dashboard can show what each task waits on
+        "edges": [[t.id, s] for t in dag.tasks.values() for s in t.successors],
         "stages": stages,
         "naive": schedule_to_json(naive, dag, vms),
         "heft": schedule_to_json(heft, dag, vms),
@@ -229,16 +262,30 @@ def classic():
 # New dashboard API
 # ---------------------------------------------------------------------------
 
+def parse_instance_args(require_seed=False):
+    """Read tasks / vms / beta / seed from the query string (raises ValueError)."""
+    num_tasks = max(5, min(MAX_TASKS, int(request.args.get("tasks", 30))))
+    num_vms = max(2, min(MAX_VMS, int(request.args.get("vms", 6))))
+    beta = float(request.args.get("beta", 0.4))
+    if not math.isfinite(beta):
+        raise ValueError("beta must be a finite number")
+    beta = max(0.0, min(0.95, beta))
+    seed_arg = request.args.get("seed", "").strip()
+    if seed_arg:
+        seed = int(seed_arg)
+    elif require_seed:
+        raise ValueError("seed is required")
+    else:
+        seed = random.randrange(10_000)
+    return num_tasks, num_vms, beta, seed
+
+
 @app.route("/api/schedule")
 def api_schedule():
     """Generate a workflow and schedule it five ways. Query params:
     tasks, vms, seed (blank = random), beta, find=1 (scan for a seed where search helps)."""
     try:
-        num_tasks = max(5, min(MAX_TASKS, int(request.args.get("tasks", 30))))
-        num_vms = max(2, min(MAX_VMS, int(request.args.get("vms", 6))))
-        beta = max(0.0, min(0.95, float(request.args.get("beta", 0.4))))
-        seed_arg = request.args.get("seed", "").strip()
-        seed = int(seed_arg) if seed_arg else random.randrange(10_000)
+        num_tasks, num_vms, beta, seed = parse_instance_args()
     except ValueError:
         return jsonify({"error": "tasks, vms, seed and beta must be numbers"}), 400
 
@@ -257,6 +304,114 @@ def api_schedule():
 
 
 # ---------------------------------------------------------------------------
+# Disruption: fail or slow down one instance, then repair selectively
+# ---------------------------------------------------------------------------
+
+def schedule_for_strategy(name, dag, vms, num_tasks, seed, beta):
+    """Rebuild one of the four dashboard schedules. Mirrors run_pipeline, and the
+    searches are seeded, so this reproduces exactly what /api/schedule returned."""
+    if name == "naive":
+        return round_robin_schedule(dag, vms)
+    heft = heft_schedule(dag, vms)
+    if name == "heft":
+        return heft
+    iterations = iteration_budget(num_tasks)
+    if name == "ils":
+        best, _, _ = traced_ils(heft, dag, vms, iterations, seed)
+        return best
+    result, _ = cost_aware_local_search(
+        heft, dag, vms,
+        alpha=(1.0 - beta) * 0.8, beta=beta, gamma=(1.0 - beta) * 0.2,
+        max_iterations=max(200, iterations // 2), seed=seed,
+    )
+    return result
+
+
+def _moved_task_ids(before, after):
+    """Tasks whose instance or start time differs between two schedules."""
+    moved = []
+    for tid, old in before.assignments.items():
+        new = after.assignments.get(tid)
+        if new is None or new.vm_id != old.vm_id or abs(new.start_time - old.start_time) > 1e-6:
+            moved.append(tid)
+    return sorted(moved)
+
+
+@app.route("/api/event")
+def api_event():
+    """Fail or slow down one instance partway through a schedule and repair it.
+    Params: tasks, vms, beta, seed (all required to reproduce the run on screen),
+    strategy (naive|heft|ils|cost_aware), type (failure|slowdown), vm (instance id),
+    at (0-0.95, fraction of the schedule's duration), factor (slowdown speed, 0.1-0.9).
+    Compares the selective repair against a full re-plan of every unfinished task."""
+    try:
+        num_tasks, num_vms, beta, seed = parse_instance_args(require_seed=True)
+        strategy = request.args.get("strategy", "heft")
+        kind = request.args.get("type", "failure")
+        vm_id = int(request.args.get("vm", ""))
+        at = float(request.args.get("at", 0.4))
+        factor = float(request.args.get("factor", 0.5))
+    except ValueError as exc:
+        return jsonify({"error": "invalid parameters: " + str(exc)}), 400
+    if strategy not in STRATEGIES:
+        return jsonify({"error": "strategy must be one of " + ", ".join(STRATEGIES)}), 400
+    if kind not in ("failure", "slowdown"):
+        return jsonify({"error": "type must be failure or slowdown"}), 400
+    if not (math.isfinite(at) and math.isfinite(factor)):
+        return jsonify({"error": "at and factor must be finite numbers"}), 400
+    at = max(0.0, min(0.95, at))
+    factor = max(0.1, min(0.9, factor))
+
+    with LOCK:
+        dag, vms = build_instance(num_tasks, num_vms, seed)
+        if vm_id not in {v.id for v in vms}:
+            return jsonify({"error": "instance %d does not exist in this run" % vm_id}), 400
+        before = schedule_for_strategy(strategy, dag, vms, num_tasks, seed, beta)
+        current_time = before.makespan() * at
+
+        if kind == "failure":
+            event = VMFailureEvent(vm_id=vm_id, time=current_time)
+            replan_vms = vms
+        else:
+            event = VMSlowdownEvent(vm_id=vm_id, time=current_time, speed_multiplier=factor)
+            # a full re-plan has to see the slowed instance too
+            replan_vms = [VM(v.id, v.speed * factor, v.cost_per_hour) if v.id == vm_id else v
+                          for v in vms]
+
+        t0 = time.perf_counter()
+        after, _, _, affected = handle_event(dag, vms, before, event, current_time, threshold=0.0)
+        selective_ms = (time.perf_counter() - t0) * 1000
+
+        t0 = time.perf_counter()
+        full = naive_full_reschedule(dag, replan_vms, before, event, current_time)
+        full_ms = (time.perf_counter() - t0) * 1000
+
+        unfinished = sum(1 for a in before.assignments.values() if a.end_time > current_time)
+        result = {
+            "event": {"type": kind, "vm": vm_id, "time": round(current_time, 2), "at": at,
+                      "factor": factor, "strategy": strategy},
+            "ignored": not affected,
+            "before": schedule_to_json(before, dag, vms),
+            "after": schedule_to_json(after, dag, vms),
+            "affected": sorted(affected),
+            "moved": _moved_task_ids(before, after),
+            "selective": {
+                "touched": len(affected),
+                "ms": round(selective_ms, 3),
+                "makespan": round(after.makespan(), 2),
+                "stability": round(_schedule_stability(before, after), 1),
+            },
+            "naive": {
+                "touched": unfinished,
+                "ms": round(full_ms, 3),
+                "makespan": round(full.makespan(), 2),
+                "stability": round(_schedule_stability(before, full), 1),
+            },
+        }
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
 # Averaged benchmarks (same shapes as STATIC / DYNAMIC / TRADEOFF)
 # ---------------------------------------------------------------------------
 
@@ -266,66 +421,83 @@ def _avg(rows, key):
 
 @app.route("/api/benchmark/static")
 def benchmark_static():
-    trials = int(request.args.get("trials", 30))
-    seed_base = int(request.args.get("seed", 1000))
-    with LOCK:
+    try:
+        trials = int_arg("trials", 30, 1, 100)
+        seed_base = int_arg("seed", 1000, 0, 10**9)
+    except ValueError:
+        return jsonify({"error": "trials and seed must be whole numbers"}), 400
+
+    def compute():
         rows = run_static_benchmark(
             num_trials=trials, num_tasks=20, num_levels=6, num_vms=5,
             ls_iterations=500, seed_base=seed_base,
         )
-    return jsonify({
-        "trials": len(rows),
-        "methods": [
-            {
-                "key": key,
-                "makespan": round(_avg(rows, f"{key}_makespan"), 2),
-                "cost": round(_avg(rows, f"{key}_cost"), 2),
-                "utilization": round(_avg(rows, f"{key}_utilization"), 2),
-                "loadBalance": round(_avg(rows, f"{key}_load_balance"), 4),
-            }
-            for key in ("heft", "ls", "cost_aware")
-        ],
-    })
+        return {
+            "trials": len(rows),
+            "methods": [
+                {
+                    "key": key,
+                    "makespan": round(_avg(rows, f"{key}_makespan"), 2),
+                    "cost": round(_avg(rows, f"{key}_cost"), 2),
+                    "utilization": round(_avg(rows, f"{key}_utilization"), 2),
+                    "loadBalance": round(_avg(rows, f"{key}_load_balance"), 4),
+                }
+                for key in ("heft", "ls", "cost_aware")
+            ],
+        }
+
+    with LOCK:
+        return jsonify(cached(("static", trials, seed_base), compute))
 
 
 @app.route("/api/benchmark/dynamic")
 def benchmark_dynamic():
-    trials = int(request.args.get("trials", 20))
-    seed_base = int(request.args.get("seed", 2000))
-    with LOCK:
+    try:
+        trials = int_arg("trials", 20, 1, 100)
+        seed_base = int_arg("seed", 2000, 0, 10**9)
+    except ValueError:
+        return jsonify({"error": "trials and seed must be whole numbers"}), 400
+
+    def compute():
         rows = run_dynamic_benchmark(
             num_trials=trials, num_tasks=25, num_levels=7, num_vms=6, seed_base=seed_base,
         )
-    return jsonify({
-        "trials": len(rows),
-        "methods": [
-            {
-                "key": "selective",
-                "tasksTouched": round(_avg(rows, "tasks_touched_selective"), 2),
-                "repairMs": round(_avg(rows, "selective_time_sec") * 1000, 4),
-                "stability": round(_avg(rows, "stability_selective"), 1),
-                "makespan": round(_avg(rows, "selective_makespan"), 2),
-            },
-            {
-                "key": "naive",
-                "tasksTouched": round(_avg(rows, "tasks_touched_naive"), 2),
-                "repairMs": round(_avg(rows, "naive_time_sec") * 1000, 4),
-                "stability": round(_avg(rows, "stability_naive"), 1),
-                "makespan": round(_avg(rows, "naive_makespan"), 2),
-            },
-        ],
-    })
+        return {
+            "trials": len(rows),
+            "methods": [
+                {
+                    "key": "selective",
+                    "tasksTouched": round(_avg(rows, "tasks_touched_selective"), 2),
+                    "repairMs": round(_avg(rows, "selective_time_sec") * 1000, 4),
+                    "stability": round(_avg(rows, "stability_selective"), 1),
+                    "makespan": round(_avg(rows, "selective_makespan"), 2),
+                },
+                {
+                    "key": "naive",
+                    "tasksTouched": round(_avg(rows, "tasks_touched_naive"), 2),
+                    "repairMs": round(_avg(rows, "naive_time_sec") * 1000, 4),
+                    "stability": round(_avg(rows, "stability_naive"), 1),
+                    "makespan": round(_avg(rows, "naive_makespan"), 2),
+                },
+            ],
+        }
+
+    with LOCK:
+        return jsonify(cached(("dynamic", trials, seed_base), compute))
 
 
 @app.route("/api/benchmark/tradeoff")
 def benchmark_tradeoff():
     """Sweep the cost weight beta -> one (makespan, cost) point per beta.
     Mirrors core/plots.py (re-implemented so matplotlib isn't required)."""
-    num_dags = int(request.args.get("dags", 8))
-    seed_base = int(request.args.get("seed", 3000))
+    try:
+        num_dags = int_arg("dags", 8, 1, 20)
+        seed_base = int_arg("seed", 3000, 0, 10**9)
+    except ValueError:
+        return jsonify({"error": "dags and seed must be whole numbers"}), 400
     betas = [0.0, 0.2, 0.4, 0.6, 0.8, 0.95]
 
-    with LOCK:
+    def compute():
         instances = []
         for i in range(num_dags):
             seed = seed_base + i
@@ -347,7 +519,10 @@ def benchmark_tradeoff():
             points.append({"beta": beta,
                            "makespan": round(statistics.mean(makespans), 2),
                            "cost": round(statistics.mean(costs), 2)})
-    return jsonify(points)
+        return points
+
+    with LOCK:
+        return jsonify(cached(("tradeoff", num_dags, seed_base), compute))
 
 
 # ---------------------------------------------------------------------------

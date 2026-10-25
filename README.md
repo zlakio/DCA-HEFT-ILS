@@ -104,7 +104,8 @@ The dashboard schedules one random workload four ways and compares them:
 | Endpoint | Purpose |
 |---|---|
 | `GET /` | Serves `dashboard.html` |
-| `GET /api/schedule` | Generates a workload and returns all four schedules, stage timings, search trace and operator stats. Params: `tasks`, `vms`, `seed`, `beta`, `find=1` |
+| `GET /api/schedule` | Generates a workload and returns all four schedules, stage timings, search trace and operator stats. Params: `tasks`, `vms`, `seed`, `beta`, `find=1`. Also returns dependency `edges`. |
+| `GET /api/event` | Fails or slows one instance mid-run and returns the schedule before/after selective repair, plus a full re-plan for comparison. Params: `tasks`, `vms`, `beta`, `seed` (required), `strategy`, `type=failure\|slowdown`, `vm`, `at` (0-0.95), `factor` |
 | `GET /api/benchmark/static` | Averaged HEFT vs local search vs cost-aware results |
 | `GET /api/benchmark/dynamic` | Averaged selective repair vs naive full reschedule |
 | `GET /api/benchmark/tradeoff` | Cost-vs-makespan points as beta is swept |
@@ -150,10 +151,7 @@ DCA-HEFT-ILS/
 ├── tests/                   # One test module per core component
 ├── plots/                   # Generated figures
 ├── server.py                # Flask bridge between core/ and the dashboard
-<<<<<<< HEAD
 ├── static/                  # Shared dashboard assets: style.css, app.js, demo.js (demo-mode data), self-hosted Geist font
-=======
->>>>>>> c91dcd74e5078970b1a7dfa62767f1529088dba9
 ├── dashboard.html           # Interactive dashboard (needs server.py)
 ├── index.html               # Static demo page (simulated data)
 └── README.md
@@ -201,3 +199,7 @@ Averaged over many random workloads (exact numbers vary slightly with trial coun
 ## References
 
 1. H. Topcuoglu, S. Hariri, and M.-Y. Wu, "Performance-effective and low-complexity task scheduling for heterogeneous computing," *IEEE Transactions on Parallel and Distributed Systems*, vol. 13, no. 3, pp. 260-274, 2002. Introduces HEFT and CPOP; defines the upward-rank priority scheme and insertion-based earliest-finish-time scheduling used as the baseline in this project.
+
+## Tests
+
+`python -m tests.test_server_api` checks the dependency edges, the failure/slowdown repair rules, input validation and benchmark caching.
